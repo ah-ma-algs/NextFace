@@ -10,7 +10,8 @@ import argparse
 import pickle
 import tqdm
 import sys
-
+import pathlib
+import time
 class Optimizer:
 
     def __init__(self, outputDir, config):
@@ -117,7 +118,8 @@ class Optimizer:
         if os.path.isfile(imagePath):
             self.inputImage = Image(imagePath, self.device, self.config.maxResolution)
         else:
-            self.inputImage = ImageFolder(imagePath, self.device, self.config.maxResolution)
+            print(self.curr_permute,'1234466')
+            self.inputImage = ImageFolder(imagePath, self.device, self.config.maxResolution, self.curr_permute)
 
         self.framesNumber = self.inputImage.tensor.shape[0]
         #self.inputImage = Image(imagePath, self.device)
@@ -227,7 +229,7 @@ class Optimizer:
             {'params': self.pipeline.vAlbedoCoeff, 'lr': 0.007}
         ])
         losses = []
-
+        
         for iter in tqdm.tqdm(range(self.config.iterStep2 + 1)):
             if iter == 100:
                 optimizer.add_param_group({'params': self.pipeline.vShapeCoeff, 'lr': 0.01})
@@ -236,29 +238,46 @@ class Optimizer:
                 optimizer.add_param_group({'params': self.pipeline.vTranslation, 'lr': 0.0001})
 
             optimizer.zero_grad()
+            s=time.time()
             vertices, diffAlbedo, specAlbedo = self.pipeline.morphableModel.computeShapeAlbedo(self.pipeline.vShapeCoeff, self.pipeline.vExpCoeff, self.pipeline.vAlbedoCoeff)
+            #print(time.time() - s)
+            s=time.time()
             cameraVerts = self.pipeline.camera.transformVertices(vertices, self.pipeline.vTranslation, self.pipeline.vRotation)
+            #print(time.time() - s)
+            s=time.time()
             diffuseTextures = self.pipeline.morphableModel.generateTextureFromAlbedo(diffAlbedo)
+            #print(time.time() - s)
+            s=time.time()
             specularTextures = self.pipeline.morphableModel.generateTextureFromAlbedo(specAlbedo)
 
+            #print(time.time() - s)
+            s=time.time()
             images = self.pipeline.render(cameraVerts, diffuseTextures, specularTextures)
+            #print(time.time() - s)
+            s=time.time()
             mask = images[..., 3:]
             smoothedImage = smoothImage(images[..., 0:3], self.smoothing)
             diff = mask * (smoothedImage - inputTensor).abs()
             #photoLoss =  diff.mean(dim=-1).sum() / float(self.framesNumber)
             photoLoss = 1000.* diff.mean()
+            #print(time.time() - s)
+            s=time.time()
             landmarksLoss = self.config.weightLandmarksLossStep2 *  self.landmarkLoss(cameraVerts, self.landmarks)
 
+            #print(time.time() - s)
+            s=time.time()
             regLoss = 0.0001 * self.pipeline.vShCoeffs.pow(2).mean()
             regLoss += self.config.weightAlbedoReg * self.regStatModel(self.pipeline.vAlbedoCoeff, self.pipeline.morphableModel.diffuseAlbedoPcaVar)
             regLoss += self.config.weightShapeReg * self.regStatModel(self.pipeline.vShapeCoeff, self.pipeline.morphableModel.shapePcaVar)
             regLoss += self.config.weightExpressionReg * self.regStatModel(self.pipeline.vExpCoeff, self.pipeline.morphableModel.expressionPcaVar)
+            #print(time.time() - s)
+            s=time.time()
 
             loss = photoLoss + landmarksLoss + regLoss
-
             losses.append(loss.item())
             loss.backward()
             optimizer.step()
+            #print(time.time() - s,'ss')
             if self.verbose:
                 print(iter, ' => Loss:', loss.item(),
                       '. photo Loss:', photoLoss.item(),
@@ -401,7 +420,10 @@ class Optimizer:
                            illum[i],
                            diffuseAlbedo[self.getTextureIndex(i)],
                            specularAlbedo[self.getTextureIndex(i)],
-                          roughnessAlbedo[self.getTextureIndex(i)]], dim=1)
+                           roughnessAlbedo[self.getTextureIndex(i)]], dim=1)
+            
+            saveImage(images[i], outputDir + '/renderr_' + str(i) + '.png')
+
             saveImage(renderAll, outputDir + '/render_' + str(i) + '.png')
 
             saveImage(vDiffTextures[self.getTextureIndex(i)], outputDir + prefix + 'diffuseMap_' + str(self.getTextureIndex(i)) + '.png')
@@ -442,7 +464,9 @@ class Optimizer:
             self.runStep3()
         end = time.time()
         print("took {:.2f} minutes to optimize".format((end - start) / 60.), file=sys.stderr, flush=True)
+
         self.saveOutput(self.config.rtSamples, self.outputDir)
+
 
 if __name__ == "__main__":
 
@@ -459,6 +483,7 @@ if __name__ == "__main__":
     parser.add_argument("--skipStage1", dest='skipStage1', action='store_true', help='if true, the first (coarse) stage is skipped (stage1). useful if u want to resume optimization from a checkpoint', required=False)
     parser.add_argument("--skipStage2", dest='skipStage2', action='store_true', help='if true, the second stage is skipped (stage2).  useful if u want to resume optimization from a checkpoint', required=False)
     parser.add_argument("--skipStage3", dest='skipStage3', action='store_true', help='if true, the third stage is skipped (stage3).  useful if u want to resume optimization from a checkpoint', required=False)
+    parser.add_argument("--permute", dest='permute', action='store_true', help='if true, check directory for left, right and front folders for images to permute and process', required=False)
     params = parser.parse_args()
 
     inputDir = params.input
@@ -487,9 +512,53 @@ if __name__ == "__main__":
             config.lamdmarksDetectorType = 'fan'
 
     optimizer = Optimizer(outputDir, config)
-    optimizer.run(inputDir,
-                  sharedIdentity= sharedIdentity,
-                  checkpoint= checkpoint,
-                  doStep1= doStep1,
-                  doStep2 = doStep2,
-                  doStep3= doStep3)
+    if params.permute:
+        import glob
+        front_imgs = glob.glob(os.path.join(inputDir,'Front/*'))#os.listdir(os.path.join(inputDir,'Front'))
+        Left_imgs  = glob.glob(os.path.join(inputDir,'Left/*'))#os.listdir(os.path.join(inputDir,'Left'))
+        Right_imgs = glob.glob(os.path.join(inputDir,'Right/*'))#os.listdir(os.path.join(inputDir,'Right'))        
+        import itertools
+        optimizer.permutes = itertools.product(*[front_imgs,Left_imgs,Right_imgs])
+        #optimizer.permutes = itertools.permutations(front_imgs + Left_imgs + Right_imgs,3)
+    else:
+        optimizer.permutes = None
+        optimizer.curr_permute = None
+    if params.permute:
+        import shutil
+        for permute in optimizer.permutes:
+            print('--------',permute)
+            
+            optimizer.curr_permute = permute
+            try:
+                optimizer.run(inputDir,
+                              sharedIdentity= sharedIdentity,
+                              checkpoint= checkpoint,
+                              doStep1= doStep1,
+                              doStep2 = doStep2,
+                              doStep3= doStep3)
+            
+                join_names = '-'.join([os.path.split(path)[1].split('.')[0] for path in permute])
+                outputDi = optimizer.outputDir
+                if optimizer.outputDir[-1] == '/':
+                    outputDi = optimizer.outputDir[:-1] + '_'
+                else:
+                    outputDi += '_'
+                save_dir = os.path.join(outputDi, join_names)
+                #pathlib.Path(save_dir).mkdir(parents=True, exist_ok=True)
+                shutil.copytree(optimizer.outputDir, save_dir, copy_function = shutil.copy)#,dirs_exist_ok=True)
+
+            except Exception as e:
+                if 'face' not in str(e):
+                    print(str(e))
+                    exit()
+                with open('Exceptions.txt','a') as f:
+                    f.write(str(e))
+                    f.write(str(permute))
+    else:
+        optimizer.run(inputDir,
+                      sharedIdentity= sharedIdentity,
+                      checkpoint= checkpoint,
+                      doStep1= doStep1,
+                      doStep2 = doStep2,
+                      doStep3= doStep3)
+        
